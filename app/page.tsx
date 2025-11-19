@@ -4,7 +4,8 @@ import { useEffect, useState, ChangeEvent, FocusEvent } from "react";
 import "./globals.css";
 
 interface Inputs {
-  todaySales: string;
+  todayActualSales: string; // ← 今日の実績売上（入力追加）
+  todayPredSales: string; // ← 今日の売上予測（従来 todaySales を改名）
   tomorrowSales: string;
   dayAfterSales: string;
   thawedOyako: string;
@@ -19,9 +20,19 @@ interface UsageRow {
   karaage_pack: number;
 }
 
+interface CalcDetail {
+  todayPredPack: number;
+  todaySoFarPack: number; // 今日ここまで使った想定量
+  remainingTodayUse: number; // 今日これから使う量
+  leftoverEndOfDay: number; // 今日終了時点のあまり
+  tomorrowNeed: number;
+  dayAfterNeed: number;
+}
+
 interface ResultDetail {
   pack: number;
   gram: number;
+  detail: CalcDetail;
 }
 
 interface Results {
@@ -32,7 +43,8 @@ interface Results {
 
 export default function Home() {
   const [inputs, setInputs] = useState<Inputs>({
-    todaySales: "",
+    todayActualSales: "",
+    todayPredSales: "",
     tomorrowSales: "",
     dayAfterSales: "",
     thawedOyako: "",
@@ -42,16 +54,12 @@ export default function Home() {
 
   const [usageData, setUsageData] = useState<UsageRow[]>([]);
   const [results, setResults] = useState<Results | null>(null);
-
-  // ⭐ 現在選択中の入力欄（今日/明日/明後日）
   const [activeField, setActiveField] = useState<keyof Inputs | null>(null);
 
-  // 売上候補
   const presets = [
     350000, 400000, 450000, 500000, 550000, 600000, 650000, 700000, 800000,
   ];
 
-  // JSON 読み込み
   useEffect(() => {
     fetch("/meat_usage.json")
       .then((res) => res.json())
@@ -60,7 +68,6 @@ export default function Home() {
       );
   }, []);
 
-  // 金額入力：カンマ対応
   const handleChange = (e: ChangeEvent<HTMLInputElement>) => {
     const { name, value } = e.target;
     const noComma = value.replace(/,/g, "");
@@ -69,90 +76,103 @@ export default function Home() {
     }
   };
 
-  // 入力欄をタップ → activeField 切り替え
   const handleFocus = (e: FocusEvent<HTMLInputElement>) => {
-    const name = e.target.name as keyof Inputs;
-    setActiveField(name);
+    setActiveField(e.target.name as keyof Inputs);
+  };
+
+  const applyPreset = (value: number) => {
+    if (!activeField) return;
+    setInputs((prev) => ({ ...prev, [activeField]: String(value) }));
+  };
+
+  const packFromSales = (
+    sales: number,
+    type: "oyako" | "gokujo" | "karaage"
+  ) => {
+    const row = findRow(sales);
+    if (type === "karaage") return row.karaage_pack;
+    return gToPack(type === "oyako" ? row.oyako_g : row.gokujo_g);
   };
 
   // g → pack
   const gToPack = (g: number) => g / 2000;
 
-  // 最も近い行を返す
+  // 最も近い行
   const findRow = (sales: number): UsageRow => {
+    if (usageData.length === 0)
+      return { sales: 0, oyako_g: 0, gokujo_g: 0, karaage_pack: 0 };
     if (sales <= usageData[0].sales) return usageData[0];
     if (sales >= usageData[usageData.length - 1].sales)
       return usageData[usageData.length - 1];
-
     return usageData.reduce((prev, curr) =>
       Math.abs(curr.sales - sales) < Math.abs(prev.sales - sales) ? curr : prev
     );
   };
 
-  // 売上候補を「選択された欄」だけに反映
-  const applyPreset = (value: number) => {
-    if (!activeField) return;
-    setInputs((prev) => ({
-      ...prev,
-      [activeField]: String(value),
-    }));
-  };
-
-  // 計算
   const calculateThaw = () => {
-    const t = Number(inputs.todaySales || 0);
-    const tm = Number(inputs.tomorrowSales || 0);
-    const af = Number(inputs.dayAfterSales || 0);
+    // 売上
+    const todayActual = Number(inputs.todayActualSales || 0); // today實績
+    const todayPred = Number(inputs.todayPredSales || 0); // today予測
+    const tomorrow = Number(inputs.tomorrowSales || 0);
+    const dayAfter = Number(inputs.dayAfterSales || 0);
 
+    // 解凍済み
     const thawOy = Number(inputs.thawedOyako || 0);
     const thawGo = Number(inputs.thawedGokujo || 0);
     const thawKa = Number(inputs.thawedKaraage || 0);
 
-    const rT = findRow(t);
-    const rTm = findRow(tm);
-    const rAf = findRow(af);
+    const calc = (
+      type: "oyako" | "gokujo" | "karaage",
+      thawedPack: number
+    ): ResultDetail => {
+      const todayPredPack = packFromSales(todayPred, type);
+      const todaySoFarPack = packFromSales(todayActual, type);
+      const remainingTodayUse = Math.max(todayPredPack - todaySoFarPack, 0);
+      const leftoverEndOfDay = thawedPack - remainingTodayUse;
 
-    const tOy = gToPack(rT.oyako_g);
-    const tmOy = gToPack(rTm.oyako_g);
-    const afOy = gToPack(rAf.oyako_g);
+      const tomorrowNeed = packFromSales(tomorrow, type);
+      const dayAfterNeed = packFromSales(dayAfter, type);
+      const futureNeed = tomorrowNeed + dayAfterNeed;
 
-    const tGo = gToPack(rT.gokujo_g);
-    const tmGo = gToPack(rTm.gokujo_g);
-    const afGo = gToPack(rAf.gokujo_g);
+      const needPack = Math.max(
+        Math.ceil(futureNeed - Math.max(leftoverEndOfDay, 0)),
+        0
+      );
 
-    const tKa = rT.karaage_pack;
-    const tmKa = rTm.karaage_pack;
-    const afKa = rAf.karaage_pack;
-
-    const calc = (thawed: number, t: number, tm: number, af: number) => {
-      const left = thawed - t;
-      const needPack = Math.max(Math.ceil(tm + af - left), 0);
       return {
         pack: needPack,
         gram: needPack * 2000,
+        detail: {
+          todayPredPack,
+          todaySoFarPack,
+          remainingTodayUse,
+          leftoverEndOfDay,
+          tomorrowNeed,
+          dayAfterNeed,
+        },
       };
     };
 
     setResults({
-      oyako: calc(thawOy, tOy, tmOy, afOy),
-      gokujo: calc(thawGo, tGo, tmGo, afGo),
-      karaage: calc(thawKa, tKa, tmKa, afKa),
+      oyako: calc("oyako", thawOy),
+      gokujo: calc("gokujo", thawGo),
+      karaage: calc("karaage", thawKa),
     });
   };
 
   return (
     <div className="container">
-      <h1>親子丼 お肉解凍量計算ツール</h1>
+      <h1>お肉解凍計算ツール</h1>
 
       {/* 売上候補 */}
       <div className="preset-box">
-        <h3>売上候補（タップすると選択中の欄に反映）</h3>
+        <h3>売上候補（タップで適用）</h3>
         <div className="preset-grid">
           {presets.map((p, i) => (
             <button
               key={i}
-              className="preset-btn"
               onClick={() => applyPreset(p)}
+              className="preset-btn"
             >
               {p.toLocaleString()}円
             </button>
@@ -162,22 +182,32 @@ export default function Home() {
 
       <div className="card">
         <div className="input-area">
-          {/* 売上の3日分 */}
           <div>
-            <h3>売上入力</h3>
-
+            <h3>🏪 今日の売上</h3>
             <Input
-              label="今日の売上"
-              name="todaySales"
-              value={inputs.todaySales}
+              label="実績（ここまで）"
+              name="todayActualSales"
+              value={inputs.todayActualSales}
               onChange={handleChange}
               onFocus={handleFocus}
               activeField={activeField}
               unit="円"
             />
-
             <Input
-              label="明日の売上"
+              label="予測（1日）"
+              name="todayPredSales"
+              value={inputs.todayPredSales}
+              onChange={handleChange}
+              onFocus={handleFocus}
+              activeField={activeField}
+              unit="円"
+            />
+          </div>
+
+          <div>
+            <h3>📊 明日以降の売上予測</h3>
+            <Input
+              label="明日"
               name="tomorrowSales"
               value={inputs.tomorrowSales}
               onChange={handleChange}
@@ -185,9 +215,8 @@ export default function Home() {
               activeField={activeField}
               unit="円"
             />
-
             <Input
-              label="明後日の売上"
+              label="明後日"
               name="dayAfterSales"
               value={inputs.dayAfterSales}
               onChange={handleChange}
@@ -197,10 +226,8 @@ export default function Home() {
             />
           </div>
 
-          {/* お肉 */}
           <div>
-            <h3>解凍済みのお肉（パック）</h3>
-
+            <h3>🥩 解凍済み（冷蔵庫）</h3>
             <Input
               label="親子肉"
               name="thawedOyako"
@@ -210,7 +237,6 @@ export default function Home() {
               activeField={activeField}
               unit="パック"
             />
-
             <Input
               label="極上肉"
               name="thawedGokujo"
@@ -220,7 +246,6 @@ export default function Home() {
               activeField={activeField}
               unit="パック"
             />
-
             <Input
               label="鶏から"
               name="thawedKaraage"
@@ -239,26 +264,36 @@ export default function Home() {
       </div>
 
       {results && (
-        <div className="result-box">
-          <h2>今日解凍すべき量</h2>
-          <ul>
-            <li>
-              親子肉：{results.oyako.pack} パック（{results.oyako.gram} g）
-            </li>
-            <li>
-              極上肉：{results.gokujo.pack} パック（{results.gokujo.gram} g）
-            </li>
-            <li>
-              鶏から：{results.karaage.pack} パック（{results.karaage.gram} g）
-            </li>
-          </ul>
-        </div>
+        <>
+          <div className="result-box">
+            <h2>📌 今日追加で解凍すべき量</h2>
+            <ul>
+              <li>
+                親子肉：{results.oyako.pack} パック（{results.oyako.gram} g）
+              </li>
+              <li>
+                極上肉：{results.gokujo.pack} パック（{results.gokujo.gram} g）
+              </li>
+              <li>
+                鶏から：{results.karaage.pack} パック（{results.karaage.gram}{" "}
+                g）
+              </li>
+            </ul>
+          </div>
+
+          <div className="detail-box">
+            <h2>🧮 計算内訳</h2>
+            <DetailSection title="親子肉" result={results.oyako} />
+            <DetailSection title="極上肉" result={results.gokujo} />
+            <DetailSection title="鶏から" result={results.karaage} />
+          </div>
+        </>
       )}
     </div>
   );
 }
 
-// 入力コンポーネント
+// 🧩 Input コンポーネント
 interface InputProps {
   label: string;
   name: keyof Inputs;
@@ -279,7 +314,6 @@ function Input({
   unit,
 }: InputProps) {
   const formatted = value ? Number(value).toLocaleString() : "";
-
   return (
     <div className="input-group">
       <label>{label}</label>
@@ -295,6 +329,34 @@ function Input({
         />
         <span>{unit}</span>
       </div>
+    </div>
+  );
+}
+
+// 🔍 計算詳細セクション
+interface DetailSectionProps {
+  title: string;
+  result: ResultDetail;
+}
+
+function DetailSection({ title, result }: DetailSectionProps) {
+  const d = result.detail;
+  return (
+    <div className="detail-section">
+      <h3>{title}</h3>
+      <ul>
+        <li>今日の予測使用量（1日）：{d.todayPredPack.toFixed(2)} パック</li>
+        <li>現在までの使用量（実績）：{d.todaySoFarPack.toFixed(2)} パック</li>
+        <li>これから使う量：{d.remainingTodayUse.toFixed(2)} パック</li>
+        <li>今日終了時点のあまり：{d.leftoverEndOfDay.toFixed(2)} パック</li>
+        <li>明日：{d.tomorrowNeed.toFixed(2)} パック</li>
+        <li>明後日：{d.dayAfterNeed.toFixed(2)} パック</li>
+        <li>
+          <strong>
+            ⇒ 解凍が必要：{result.pack} パック（{result.gram} g）
+          </strong>
+        </li>
+      </ul>
     </div>
   );
 }
